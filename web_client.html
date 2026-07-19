@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P2P 视频通话 - Web 客户端</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         margin: 0; background: #0f1020; color: #e8e8f0;
+         display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { padding: 14px 20px; background: #1a1b35; display: flex;
+           align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+  header h1 { font-size: 18px; margin: 0; }
+  .setup { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+  .setup input { padding: 7px 10px; border: 1px solid #33345a; border-radius: 8px;
+                 background: #0f1020; color: #e8e8f0; font-size: 13px; width: 140px; }
+  button { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
+           font-size: 13px; font-weight: 600; }
+  .btn-primary { background: #4361ee; color: #fff; }
+  .btn-danger { background: #ef4444; color: #fff; }
+  .btn-ghost { background: #2a2b4a; color: #e8e8f0; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* 摄像头状态药丸 */
+  #camPill { padding: 4px 12px; border-radius: 14px; font-size: 12px; font-weight: 600;
+             background: #2a2b4a; color: #9aa0c0; white-space: nowrap; }
+  #camPill.ok { background: #14532d; color: #86efac; }
+  #camPill.bad { background: #7f1d1d; color: #fca5a5; }
+
+  /* 顶部警示横幅（非安全上下文/摄像头失败时使用） */
+  #banner { display: none; margin: 0; padding: 12px 20px; font-size: 13px;
+            line-height: 1.7; background: #7f1d1d; color: #fee2e2; }
+  #banner.show { display: block; }
+  #banner b { color: #fff; }
+  #banner code { background: rgba(0,0,0,.35); padding: 1px 6px; border-radius: 4px; color: #fde68a; }
+
+  .stage { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1fr;
+           gap: 12px; padding: 12px; min-height: 0; }
+  /* 进入全屏时:隐藏其他 UI,舞台占满整屏 */
+  body.fs-active header, body.fs-active .bar, body.fs-active #status,
+  body.fs-active .hint, body.fs-active #banner { display: none !important; }
+  .stage:fullscreen, .stage:-webkit-full-screen {
+    width: 100vw; height: 100vh; padding: 0; gap: 0; background: #000;
+    grid-template-columns: 1fr 1fr; }
+  .vwrap { position: relative; background: #000; border-radius: 12px;
+           overflow: hidden; border: 1px solid #2a2b4a; min-height: 0; }
+  video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
+  .vlabel { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,.6);
+            padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+  .self-mirror { transform: scaleX(-1); }
+  /* 视图切换控制浮层(默认隐藏,仅在手机端点击画面后显示) */
+  .viewctl { display: none; }
+  /* 远端画面上的"点击开启声音"提示 */
+  #unmuteHint { display: none; position: absolute; bottom: 10px; left: 50%;
+                transform: translateX(-50%); background: rgba(0,0,0,.7);
+                padding: 6px 14px; border-radius: 20px; font-size: 12px; cursor: pointer; }
+
+  .bar { padding: 12px 16px; background: #1a1b35; display: flex; gap: 10px;
+         justify-content: center; flex-wrap: wrap; flex-shrink: 0; }
+  #status { padding: 6px 20px; font-size: 12px; color: #9aa0c0; min-height: 18px; flex-shrink: 0; }
+  .hint { padding: 8px 20px; font-size: 12px; color: #6b7099; line-height: 1.7; flex-shrink: 0; }
+  code { background: #2a2b4a; padding: 1px 6px; border-radius: 4px; color: #a5b4fc; }
+
+  /* ── 手机端布局 ──
+     默认:本地与远程窗口"并排"(各占一半、满高)。
+     点击画面→出现控制浮层(中间"切换大小窗"按钮 + 左右滚动箭头)。
+     轻扫/点箭头→在"本地全屏"与"远程全屏"间切换,未聚焦者变右下角小窗(PiP)。 */
+  @media (max-width: 640px), (max-width: 820px) and (max-height: 480px) {
+    .stage { grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px; position: relative; }
+    #localWrap, #remoteWrap { width: auto; height: 100%; aspect-ratio: auto; }
+    .vlabel { font-size: 11px; padding: 2px 8px; }
+
+    /* 全屏聚焦:被聚焦窗口占满,另一个变为右下角小窗 */
+    .stage[data-view="local"] #localWrap,
+    .stage[data-view="remote"] #remoteWrap {
+      position: absolute; inset: 0; z-index: 1; border-radius: 0; border: none;
+      width: auto; height: auto;
+    }
+    .stage[data-view="local"] #remoteWrap,
+    .stage[data-view="remote"] #localWrap {
+      position: absolute; right: 12px; bottom: 12px; z-index: 6;
+      width: 34vw; max-width: 150px; aspect-ratio: 3 / 4; height: auto;
+      border: 2px solid rgba(255,255,255,.4); border-radius: 10px;
+    }
+
+    /* 小窗(画中画)上的关闭叉:仅在小窗态可见,点击关闭该小窗 */
+    .pip-close { display: none; position: absolute; top: 6px; right: 6px; z-index: 9;
+                 width: 26px; height: 26px; border-radius: 50%; border: none; padding: 0;
+                 background: rgba(0,0,0,.55); color: #fff; font-size: 17px; line-height: 24px;
+                 cursor: pointer; }
+    .pip-close:active { background: rgba(0,0,0,.82); }
+    .stage[data-view="local"] #remoteWrap .pip-close,
+    .stage[data-view="remote"] #localWrap .pip-close { display: block; }
+    /* 小窗被关闭后,隐藏对应的小窗(仅留大窗) */
+    .stage.pip-hidden[data-view="local"] #remoteWrap,
+    .stage.pip-hidden[data-view="remote"] #localWrap { display: none !important; }
+
+    /* 控制浮层:纯图标半透明按钮(毛玻璃质感),浮在画面上不挤占空间 */
+    .stage.ctl-on .viewctl { display: block; position: absolute; inset: 0;
+                              z-index: 20; pointer-events: none; }
+    .vc-btn {
+      pointer-events: auto; position: absolute; bottom: 30px;
+      width: 54px; height: 54px; border-radius: 17px;
+      background: rgba(20,22,40,.55);
+      -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,.22);
+      box-shadow: 0 6px 18px rgba(0,0,0,.4);
+      color: #fff; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: transform .15s ease, background .2s ease, box-shadow .2s ease; }
+    .vc-btn:active { transform: scale(.9); background: rgba(46,50,92,.78);
+                     box-shadow: 0 3px 10px rgba(0,0,0,.5); }
+    .vc-btn svg { width: 26px; height: 26px; stroke: #fff; stroke-width: 1.7;
+                  fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    /* 按钮位置:居中底部一排 */
+    #btnSwap { left: calc(50% - 64px); }
+    #btnFs   { left: calc(50% + 10px); }
+
+    .hint { display: none; }
+    header { padding: 10px 12px; }
+    .setup input { width: 92px; }
+    .bar { gap: 8px; padding: 10px 8px; }
+    button { padding: 8px 12px; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>📹 P2P 视频通话</h1>
+  <span id="camPill">摄像头：未检测</span>
+  <div class="setup">
+    <input id="serverUrl" value="ws://localhost:8765" title="信令服务器地址" />
+    <input id="userId" placeholder="UserID (如 webA)" />
+    <input id="roomId" placeholder="房间号" value="room_001" />
+    <button id="joinBtn" class="btn-primary">加入房间</button>
+  </div>
+</header>
+
+<div id="banner"></div>
+
+<div class="stage">
+  <div class="vwrap" id="remoteWrap">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div class="vlabel">远程</div>
+    <div id="unmuteHint">🔊 点击开启声音</div>
+    <button class="pip-close" id="remotePipClose" aria-label="关闭小窗">×</button>
+  </div>
+  <div class="vwrap" id="localWrap">
+    <video id="localVideo" class="self-mirror" autoplay muted playsinline></video>
+    <div class="vlabel">本地</div>
+    <button class="pip-close" id="localPipClose" aria-label="关闭小窗">×</button>
+  </div>
+
+  <div class="viewctl" id="viewctl">
+    <!-- 切换大小窗:并排↔远程全屏↔本地全屏 -->
+    <button class="vc-btn" id="btnSwap" aria-label="切换大小窗" title="切换大小窗">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><rect x="12.5" y="12" width="7.5" height="6.5" rx="1.2" fill="#fff" stroke="none"/></svg>
+    </button>
+    <!-- 横向全屏 -->
+    <button class="vc-btn" id="btnFs" aria-label="横向全屏" title="横向全屏">
+      <svg viewBox="0 0 24 24"><path d="M8 3H5.5A2.5 2.5 0 0 0 3 5.5V8"/><path d="M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8"/><path d="M21 16v2.5A2.5 2.5 0 0 1 18.5 21H16"/><path d="M3 16v2.5A2.5 2.5 0 0 0 5.5 21H8"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="bar">
+  <button id="callBtn" class="btn-primary" disabled>呼叫</button>
+  <button id="hangupBtn" class="btn-danger" disabled>挂断</button>
+  <button id="muteBtn" class="btn-ghost">静音</button>
+  <button id="camBtn" class="btn-ghost">关摄像头</button>
+  <button id="soundBtn" class="btn-ghost">🔇 远端声音：关</button>
+</div>
+<div id="status">未连接</div>
+
+<div class="hint">
+  💡 <b>如何看到画面：</b><br>
+  ① <b>电脑端（有摄像头的一方）</b>务必在本机浏览器用
+  <code>http://localhost:8000/web_client.html</code> 打开（用 <code>localhost</code>，
+  不要用 <code>10.x.x.x</code> 局域网 IP，否则浏览器判定为非安全上下文会禁用摄像头，对方就收不到你的画面）。<br>
+  ② <b>手机端</b>用 <code>http://&lt;电脑局域网IP&gt;:8000/web_client.html</code> 打开，
+  服务器地址自动填好，与电脑进入<b>同一个房间</b>即可看到电脑画面（手机端摄像头因 http 受限，仅能接收）。<br>
+  ③ 两端 UserID 不能相同，房间号必须一致。
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+const bannerEl = $('banner');
+const camPill = $('camPill');
+const log = (m) => { statusEl.textContent = m; console.log('[call]', m); };
+
+function showBanner(html) { bannerEl.innerHTML = html; bannerEl.classList.add('show'); }
+function hideBanner() { bannerEl.classList.remove('show'); }
+function setCamPill(state, text) {
+  camPill.className = state; // '' | 'ok' | 'bad'
+  camPill.textContent = '摄像头：' + text;
+}
+
+// ── 安全上下文自检（最关键的诊断）──
+// 只有 localhost 或 https 才是安全上下文，getUserMedia 才会被允许。
+// 用局域网 IP (10.x / 192.168.x) 经 http 打开 → 摄像头必被禁用。
+if (!window.isSecureContext) {
+  showBanner(
+    '⚠️ <b>当前页面是非安全上下文（http + 局域网 IP），浏览器已禁用摄像头！</b><br>' +
+    '• <b>如果你在电脑上</b>：请改用 <code>http://localhost:8000/web_client.html</code> 重新打开本页，' +
+    '这样电脑摄像头才会被启用、对端才能看到你。<br>' +
+    '• <b>如果你在手机上</b>：http 下手机摄像头被禁（仅能接收），要手机也发画面需走 HTTPS 隧道或用原生 APK。'
+  );
+  setCamPill('bad', '被禁用(非安全)');
+}
+
+// 若通过局域网 IP 打开网页，自动把信令地址指向本机 IP，省去手填
+if (location.hostname && location.hostname !== 'localhost' &&
+    location.hostname !== '127.0.0.1') {
+  $('serverUrl').value = 'ws://' + location.hostname + ':8765';
+}
+
+// ── WebRTC 配置（与 Flutter 端一致，使用公共 STUN）──
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ],
+};
+
+let ws = null;
+let pc = null;
+let localStream = null;
+let myId = null;
+let roomId = null;
+let remoteId = null;
+let isCaller = false;
+let audioOn = true;
+let videoOn = true;
+
+// ── 媒体初始化 ──
+async function initMedia() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setCamPill('bad', '不可用(无API)');
+    log('⚠️ 此浏览器/上下文不支持 getUserMedia');
+    if (window.isSecureContext) showBanner('⚠️ 当前浏览器不支持 getUserMedia，无法采集摄像头。');
+    return false;
+  }
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    $('localVideo').srcObject = localStream;
+    setCamPill('ok', '已开启');
+    log('本地摄像头/麦克风已开启');
+    return true;
+  } catch (e) {
+    let reason = e.name || e.message;
+    let tip = '';
+    if (e.name === 'NotAllowedError') {
+      reason = '权限被拒绝';
+      tip = '请在浏览器地址栏的摄像头图标处允许权限后刷新。';
+    } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
+      reason = '未找到摄像头/麦克风';
+      tip = '请检查设备是否已连接并被系统识别。';
+    } else if (e.name === 'NotReadableError') {
+      reason = '设备被占用';
+      tip = '摄像头可能被其他程序占用，请关闭后重试。';
+    } else if (!window.isSecureContext) {
+      reason = '非安全上下文被禁';
+      tip = '请用 http://localhost:8000 打开（电脑端），手机端需 HTTPS。';
+    }
+    setCamPill('bad', '不可用(' + reason + ')');
+    log('⚠️ 无法访问摄像头/麦克风：' + reason + '（仍可作接收端）');
+    if (window.isSecureContext && tip) {
+      // 安全上下文内仍失败 → 给出具体可操作提示（不覆盖顶部非安全横幅）
+      showBanner('⚠️ 摄像头不可用：' + tip);
+    }
+    return false;
+  }
+}
+
+// ── 连接并加入房间 ──
+async function join() {
+  myId = $('userId').value.trim() || ('web_' + Date.now());
+  roomId = $('roomId').value.trim();
+  if (!roomId) { alert('请填写房间号'); return; }
+
+  // 先尝试拿本地媒体（失败也不阻断，后面走 recvonly 接收）
+  const hasMedia = await initMedia();
+  if (!hasMedia && window.isSecureContext) {
+    log('本端无摄像头，将以"仅接收"模式加入（仍可看到对方画面）');
+  }
+
+  ws = new WebSocket($('serverUrl').value.trim());
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ userId: myId }));
+    log('已连接，注册为 ' + myId);
+    ws.send(JSON.stringify({ type: 'join', from: myId, roomId }));
+  };
+  ws.onmessage = (ev) => handleSignal(JSON.parse(ev.data));
+  ws.onclose = () => { log('连接已关闭'); setControls(false); };
+  ws.onerror = () => log('⚠️ WebSocket 出错');
+}
+
+// ── 信令处理（与 Python 信令服务器协议对齐）──
+async function handleSignal(msg) {
+  switch (msg.type) {
+    case 'registered':
+      log('注册成功，等待加入房间…');
+      break;
+
+    case 'join':
+      if (msg.data && msg.data.members) {
+        const others = msg.data.members.filter((m) => m !== myId);
+        log('已进入房间 ' + roomId + '（成员：' + msg.data.members.join(', ') + '）');
+        if (others.length > 0) {
+          remoteId = others[0];
+          isCaller = true;
+          log('检测到对方 ' + remoteId + '，自动发起呼叫…');
+          setTimeout(startCall, 800);
+        }
+      } else {
+        remoteId = msg.from;
+        log(msg.from + ' 加入了房间');
+      }
+      break;
+
+    case 'call':
+      remoteId = msg.from;
+      log('收到 ' + remoteId + ' 的呼叫，等待 offer…');
+      break;
+
+    case 'offer':
+      remoteId = msg.from;
+      await handleOffer(msg.data);
+      break;
+
+    case 'answer':
+      if (pc) {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        log('已设置远程 answer，连接建立中…');
+      }
+      break;
+
+    case 'candidate':
+      if (pc && msg.data && msg.data.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.data)); }
+        catch (e) { console.warn('addIceCandidate 失败', e); }
+      }
+      break;
+
+    case 'hangup':
+      log('对方已挂断');
+      closeCall();
+      break;
+  }
+}
+
+// ── 创建 RTCPeerConnection ──
+function createPC() {
+  pc = new RTCPeerConnection(RTC_CONFIG);
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'candidate', from: myId, roomId, data: e.candidate,
+      }));
+    }
+  };
+
+  pc.ontrack = (e) => {
+    const v = $('remoteVideo');
+    v.srcObject = e.streams[0];
+    // 关键修复：远端带音轨，移动端浏览器常因"非静音自动播放"策略而黑屏。
+    // 先尝试直接播放（用户已点过"加入/呼叫"，有粘性激活，通常可过），失败则静音兜底。
+    v.play().then(() => {
+      $('unmuteHint').style.display = 'none';
+    }).catch(async () => {
+      v.muted = true; // 静音保证画面一定能播放
+      try { await v.play(); } catch (_) {}
+      $('unmuteHint').style.display = 'block'; // 提示用户点一下恢复声音
+    });
+    log('✅ 收到远程视频流');
+    setControls(true);
+  };
+
+  if (localStream) {
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  } else {
+    // 没有本地媒体(如手机 http 非安全上下文拿不到摄像头)时,
+    // 显式添加 recvonly 收发器,保证 offer 里带有音视频 m-line,
+    // 这样对方(主机)的画面仍能推送过来、本端可正常接收。
+    try {
+      pc.addTransceiver('video', { direction: 'recvonly' });
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+      log('本端无摄像头,以"仅接收"模式加入(仍可看到对方画面)');
+    } catch (e) {
+      console.warn('addTransceiver recvonly 失败', e);
+    }
+  }
+}
+
+// ── 发起呼叫（Caller）──
+async function startCall() {
+  createPC();
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'call', from: myId, roomId }));
+  ws.send(JSON.stringify({
+    type: 'offer', from: myId, roomId, data: pc.localDescription,
+  }));
+  log('已发送 offer');
+  setControls(true);
+}
+
+// ── 响应呼叫（Callee）──
+async function handleOffer(offerData) {
+  createPC();
+  await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({
+    type: 'answer', from: myId, roomId, data: pc.localDescription,
+  }));
+  log('已发送 answer');
+  setControls(true);
+}
+
+// ── 挂断 ──
+function hangup() {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'hangup', from: myId, roomId }));
+  }
+  closeCall();
+}
+function closeCall() {
+  if (pc) { pc.close(); pc = null; }
+  $('remoteVideo').srcObject = null;
+  $('unmuteHint').style.display = 'none';
+  isCaller = false;
+  setControls(false, true);
+}
+
+// ── 媒体控制 ──
+$('muteBtn').onclick = () => {
+  if (!localStream) return;
+  audioOn = !audioOn;
+  localStream.getAudioTracks().forEach((t) => (t.enabled = audioOn));
+  $('muteBtn').textContent = audioOn ? '静音' : '取消静音';
+};
+$('camBtn').onclick = () => {
+  if (!localStream) return;
+  videoOn = !videoOn;
+  localStream.getVideoTracks().forEach((t) => (t.enabled = videoOn));
+  $('camBtn').textContent = videoOn ? '关摄像头' : '开摄像头';
+};
+// 远端声音开关（默认静音，避免移动端自动播放被拦截导致黑屏）
+let remoteMuted = true;
+$('remoteVideo').muted = true;
+$('soundBtn').onclick = () => {
+  remoteMuted = !remoteMuted;
+  $('remoteVideo').muted = remoteMuted;
+  if (!remoteMuted) {
+    $('remoteVideo').play().catch(() => {});
+    $('unmuteHint').style.display = 'none';
+  }
+  $('soundBtn').textContent = remoteMuted ? '🔇 远端声音：关' : '🔊 远端声音：开';
+};
+$('unmuteHint').onclick = () => {
+  remoteMuted = false;
+  $('remoteVideo').muted = false;
+  $('remoteVideo').play().catch(() => {});
+  $('soundBtn').textContent = '🔊 远端声音：开';
+  $('unmuteHint').style.display = 'none';
+};
+
+// ── UI 状态 ──
+function setControls(active, keepCall) {
+  $('callBtn').disabled = active || keepCall;
+  $('hangupBtn').disabled = !active && !keepCall;
+}
+
+// ── 事件绑定 ──
+$('joinBtn').onclick = join;
+$('callBtn').onclick = startCall;
+$('hangupBtn').onclick = hangup;
+
+// ── 手机端视图切换(并排 / 本地全屏 / 远程全屏) + 全屏 ──
+const stageEl = document.querySelector('.stage');
+const VIEW_ORDER = ['split', 'remote', 'local'];
+let viewState = 'split';
+let ctlTimer = null;
+let suppressClick = false;
+
+function setView(s) {
+  // 如果当前已在目标态,点同一按钮则回到并排(可切换回来)
+  if (viewState === s && s !== 'split') { s = 'split'; }
+  viewState = s;
+  stageEl.dataset.view = s;
+  log('视图: ' + ({ split: '并排', remote: '远程全屏', local: '本地全屏' }[s]));
+}
+function showCtl() {
+  stageEl.classList.add('ctl-on');
+  if (ctlTimer) clearTimeout(ctlTimer);
+  ctlTimer = setTimeout(() => stageEl.classList.remove('ctl-on'), 3500);
+}
+function hideCtl() {
+  stageEl.classList.remove('ctl-on');
+  if (ctlTimer) { clearTimeout(ctlTimer); ctlTimer = null; }
+}
+
+// 切换大小窗:循环 split→remote→local→split
+function cycleView() {
+  setView(VIEW_ORDER[(VIEW_ORDER.indexOf(viewState) + 1) % 3]);
+}
+
+// 全屏切换:点击 btnFs → 直接把"当前对应的(已聚焦的)视频窗口"全屏铺满手机屏
+let isFs = false;
+let savedView = null;
+
+function enterFs() {
+  const el = stageEl;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+  if (req) { try { req.call(el); } catch (_) {} }
+  document.body.classList.add('fs-active');
+  isFs = true;
+}
+function exitFs() {
+  const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+  if (exit) { try { exit.call(document); } catch (_) {} }
+  document.body.classList.remove('fs-active');
+  isFs = false;
+}
+function toggleFullscreen() {
+  if (!isFs) {
+    savedView = viewState;   // 记住进入前的视图(当前聚焦的是本地还是远程窗口)
+    // 关键修复:并排(无单一聚焦窗口)时,默认聚焦"远程(对方)"窗口,
+    // 否则全屏后仍是两路并排(grid 1fr 1fr),看不到单窗口铺满。
+    if (viewState === 'split') setView('remote');
+    enterFs();               // 全屏整个舞台——当前聚焦的视频窗口已占满
+    log('已进入全屏(对应视频窗口)');
+  } else {
+    exitFs();
+    log('已退出全屏');
+  }
+}
+// 监听浏览器原生全屏变化:进入时锁定横屏,退出时恢复视图与竖向
+function onFsChange() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (fsEl) {
+    document.body.classList.add('fs-active');
+    isFs = true;
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('landscape').catch(function () {});
+      }
+    } catch (_) {}
+  } else {
+    document.body.classList.remove('fs-active');
+    stageEl.classList.remove('pip-hidden');  // 退出全屏复位小窗
+    isFs = false;
+    if (savedView) { setView(savedView); savedView = null; }  // 退出后恢复原视图
+    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) {}
+  }
+}
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
+
+// 点击画面 → 显示/隐藏控制浮层
+stageEl.addEventListener('click', (e) => {
+  if (suppressClick) { suppressClick = false; return; }
+  if (e.target.closest('.viewctl')) return;
+  if (stageEl.classList.contains('ctl-on')) hideCtl(); else showCtl();
+});
+$('btnSwap').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (isFs && stageEl.classList.contains('pip-hidden')) {
+    // 小窗被"×"关闭了 → 先把小窗唤出,下一轮再按布局切换
+    stageEl.classList.remove('pip-hidden');
+    log('已显示小窗(再点切换大小窗可切换布局)');
+  } else {
+    // 切换布局:横向平列 ↔ 远程全屏 ↔ 本地全屏
+    cycleView();
+  }
+  showCtl();
+});
+$('btnFs').addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); showCtl(); });
+
+// 小窗上的"×":关闭对应的小窗(点切换大小窗按钮可再显示)
+$('remotePipClose').addEventListener('click', (e) => {
+  e.stopPropagation();
+  stageEl.classList.add('pip-hidden');
+  log('已关闭小窗(点"切换大小窗"可再显示)');
+});
+$('localPipClose').addEventListener('click', (e) => {
+  e.stopPropagation();
+  stageEl.classList.add('pip-hidden');
+  log('已关闭小窗(点"切换大小窗"可再显示)');
+});
+
+// 轻扫(左右) → 循环切换视图
+let touchX = 0, touchY = 0;
+stageEl.addEventListener('touchstart', (e) => {
+  touchX = e.changedTouches[0].clientX; touchY = e.changedTouches[0].clientY;
+}, { passive: true });
+stageEl.addEventListener('touchend', (e) => {
+  const dx = e.changedTouches[0].clientX - touchX;
+  const dy = e.changedTouches[0].clientY - touchY;
+  if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+    suppressClick = true;
+    if (dx < 0) cycleView(); else setView(VIEW_ORDER[(VIEW_ORDER.indexOf(viewState) + 2) % 3]);
+    showCtl();
+  }
+}, { passive: true });
+</script>
+</body>
+</html>

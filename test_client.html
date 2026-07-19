@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P2P 视频通话 - 信令服务器测试器</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         max-width: 720px; margin: 24px auto; padding: 0 16px; color: #1a1a2e;
+         background: #f5f6fa; }
+  h1 { font-size: 20px; }
+  .card { background: #fff; border-radius: 12px; padding: 16px;
+          box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input { flex: 1; min-width: 160px; padding: 8px 10px; border: 1px solid #ccd;
+          border-radius: 8px; font-size: 14px; }
+  button { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
+           font-size: 14px; background: #4361ee; color: #fff; }
+  button.sec { background: #e0e4f5; color: #1a1a2e; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status { display: inline-flex; align-items: center; gap: 6px;
+            font-weight: 600; font-size: 14px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #aaa; }
+  .dot.on { background: #2ecc71; }
+  .dot.off { background: #e74c3c; }
+  .log { background: #1a1a2e; color: #4ade80; font-family: Consolas, monospace;
+         font-size: 12px; padding: 12px; border-radius: 8px; height: 280px;
+         overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .hint { font-size: 12px; color: #666; margin-top: 8px; line-height: 1.6; }
+  code { background: #eef; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>📡 信令服务器测试器</h1>
+
+  <div class="card">
+    <div class="row">
+      <input id="url" value="ws://localhost:8765" />
+      <button id="connectBtn">连接</button>
+      <button id="disconnectBtn" class="sec" disabled>断开</button>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <span class="status"><span id="dot" class="dot"></span>
+        <span id="statusText">未连接</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input id="userId" placeholder="输入 userId，如 userA" value="userA" />
+      <button id="joinBtn" class="sec" disabled>加入房间 room_001</button>
+    </div>
+    <div class="hint">
+      连接成功后会自动收到服务器下发的 <code>registered</code> 消息；
+      点"加入房间"会向服务器发送 <code>join</code> 消息并看到回显。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="hint">
+    💡 若双击本文件打开后无法连接，请在该目录用命令行启动一个本地 HTTP 服务再访问：
+    <br><code>python -m http.server 8000</code> 然后浏览器打开
+    <code>http://localhost:8000/test_client.html</code>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const log = (msg, color) => {
+    const el = document.createElement('div');
+    el.textContent = '› ' + msg;
+    if (color) el.style.color = color;
+    $('log').appendChild(el);
+    $('log').scrollTop = $('log').scrollHeight;
+  };
+  let ws = null;
+
+  function setStatus(connected) {
+    $('dot').className = 'dot ' + (connected ? 'on' : 'off');
+    $('statusText').textContent = connected ? '已连接' : '未连接';
+    $('connectBtn').disabled = connected;
+    $('disconnectBtn').disabled = !connected;
+    $('joinBtn').disabled = !connected;
+  }
+
+  $('connectBtn').onclick = () => {
+    const url = $('url').value.trim();
+    log('正在连接 ' + url + ' ...');
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      log('创建连接失败: ' + e.message, '#f87171');
+      return;
+    }
+    ws.onopen = () => {
+      setStatus(true);
+      log('✅ 连接成功！', '#4ade80');
+      // 首条消息必须带 userId 完成注册
+      const uid = $('userId').value.trim() || 'testUser';
+      ws.send(JSON.stringify({ userId: uid }));
+      log('→ 发送注册: { userId: "' + uid + '" }');
+    };
+    ws.onmessage = (ev) => {
+      let txt = ev.data;
+      try { txt = JSON.stringify(JSON.parse(ev.data), null, 2); } catch (_) {}
+      log('← 收到: ' + txt, '#93c5fd');
+    };
+    ws.onclose = (ev) => {
+      setStatus(false);
+      log('连接关闭 (code=' + ev.code + ')', '#fbbf24');
+    };
+    ws.onerror = () => log('⚠️ 连接出错（详见控制台）', '#f87171');
+  };
+
+  $('disconnectBtn').onclick = () => { if (ws) ws.close(); };
+
+  $('joinBtn').onclick = () => {
+    if (!ws || ws.readyState !== 1) return;
+    const msg = { type: 'join', from: $('userId').value.trim(), roomId: 'room_001' };
+    ws.send(JSON.stringify(msg));
+    log('→ 发送: ' + JSON.stringify(msg));
+  };
+</script>
+</body>
+</html>

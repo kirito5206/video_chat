@@ -1,0 +1,35 @@
+name: video_chat
+description: P2P视频通话应用 - Flutter + WebRTC
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+
+  # WebRTC - 核心 P2P 音视频
+  flutter_webrtc: ^1.0.0
+
+  # WebSocket 信令通信
+  web_socket_channel: ^3.0.1
+
+  # 状态管理
+  provider: ^6.1.1
+
+  # UUID 生成（房间号/用户ID）
+  uuid: ^4.2.2
+
+  # 日志
+  logger: ^2.0.2+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
