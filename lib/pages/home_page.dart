@@ -27,7 +27,7 @@ class _HomePageState extends State<HomePage> {
 
   bool _isConnecting = false;
 
-  /// UDP 广播/组播和主动查询优先，TCP 当前子网扫描兜底。
+  /// 根据手机 Wi-Fi IP 扫描同一网段的固定端口 8765。
   bool _userEditedServer = false; // 用户手动改过地址则不自动覆盖
   String? _discoveredUrl;
   Timer? _scanTimeout; // 扫描超时提示定时器
@@ -56,8 +56,8 @@ class _HomePageState extends State<HomePage> {
       if (_discoveredUrl == null && !_userEditedServer && mounted) {
         setState(() {
           _scanning = false;
-          _discoveryHint = '暂未发现服务器。请确认手机和电脑连接同一 Wi-Fi，'
-              '且电脑防火墙已允许 UDP 8766 和 TCP 8765。';
+          _discoveryHint = '暂未在手机 Wi-Fi 网段发现服务器。请确认手机和电脑连接同一 Wi-Fi，'
+              '且电脑防火墙已允许 TCP 8765。';
         });
       }
     });
