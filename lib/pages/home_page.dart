@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../viewmodels/call_viewmodel.dart';
+import '../services/server_discovery_service.dart';
 import 'call_page.dart';
 
 /// 首页 - 服务器连接 + 房间入口
@@ -27,19 +27,13 @@ class _HomePageState extends State<HomePage> {
 
   bool _isConnecting = false;
 
-  /// 局域网自动发现（唯一路径：TCP 子网扫描）
-  /// 手机拿到自身局域网 IP，并发连接同网段每个地址的信令端口(8765)，
-  /// 谁应答谁就是服务器 → 直接填入地址栏并自动连接。
-  /// 与真正建连走同一条 TCP 通道——只要手动填能连上，扫描就一定扫得到，
-  /// 彻底绕开 UDP 广播/组播被 AP 隔离/防火墙丢弃的问题。
+  /// UDP 广播/组播和主动查询优先，TCP 当前子网扫描兜底。
   bool _userEditedServer = false; // 用户手动改过地址则不自动覆盖
   String? _discoveredUrl;
   Timer? _scanTimeout; // 扫描超时提示定时器
   bool _scanning = false; // 是否正在扫描（显示"正在自动发现…"）
   String? _discoveryHint; // 扫描未找到时给用户的可视提示（避免无反应黑洞）
-  List<String>? _scannedPrefixes; // 诊断：手机实际扫描的网段（用于排查）
-  static const int _signalPort = 8765;
-  bool _tcpScanning = false; // 防止重复并发扫描
+  final _discoveryService = ServerDiscoveryService();
 
   @override
   void initState() {
@@ -47,96 +41,10 @@ class _HomePageState extends State<HomePage> {
     _startDiscovery();
   }
 
-  /// 局域网自动发现：TCP 子网扫描 + 扫描超时提示。
-  /// 查到服务器（同网段 8765 端口能连通）立即填入地址栏并自动连接。
+  /// 启动局域网发现；查到后立即补全地址并自动连接。
   Future<void> _startDiscovery() async {
     _startScanTimeout();
-    _scanSubnet();
-  }
-
-  /// TCP 子网扫描主路径：并发探测本网段所有主机的 8765 端口。
-  /// 手机实际网段优先；并兜底常见局域网前缀（含当前 PC 服务器网段 10.220.63.，
-  /// 优先扫描），防止手机 NetworkInterface 拿不到 WiFi IP 时彻底扫不到。
-  Future<void> _scanSubnet() async {
-    if (_tcpScanning || _discoveredUrl != null || _userEditedServer) return;
-    _tcpScanning = true;
-    // 1) 手机实际网段（有序，优先扫）
-    final orderedPrefixes = <String>[];
-    try {
-      final ifaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-        includeLoopback: false,
-      );
-      for (final iface in ifaces) {
-        for (final addr in iface.addresses) {
-          final ip = addr.address;
-          if (ip.startsWith('169.254') || ip.startsWith('127.')) {
-            continue;
-          }
-          final dot = ip.lastIndexOf('.');
-          if (dot > 0) {
-            final p = ip.substring(0, dot + 1);
-            if (!orderedPrefixes.contains(p)) {
-            orderedPrefixes.add(p);
-          }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('获取本机网段失败: $e');
-    }
-    // 2) 兜底常见局域网前缀（10.220.63. 当前服务器网段最优先）
-    const fallback = [
-      '10.220.63.',
-      '192.168.1.',
-      '192.168.0.',
-      '192.168.31.',
-      '192.168.50.',
-      '10.0.0.',
-      '10.0.1.',
-      '172.16.0.',
-    ];
-    for (final p in fallback) {
-      if (!orderedPrefixes.contains(p)) orderedPrefixes.add(p);
-    }
-    _scannedPrefixes = List.from(orderedPrefixes);
-    if (orderedPrefixes.isEmpty) {
-      _tcpScanning = false;
-      return;
-    }
-    // 收集所有 host，分批并发探测（每批上限避免手机 socket 耗尽）
-    final hosts = <String>[];
-    for (final p in orderedPrefixes) {
-      for (int i = 1; i <= 254; i++) {
-        hosts.add('$p$i');
-      }
-    }
-    const batchSize = 64;
-    for (var i = 0; i < hosts.length; i += batchSize) {
-      if (_discoveredUrl != null || _userEditedServer) {
-        _tcpScanning = false;
-        return;
-      }
-      final batch = hosts.skip(i).take(batchSize).toList();
-      await Future.wait(batch.map((h) => _probeHost(h)));
-    }
-    _tcpScanning = false;
-  }
-
-  /// 探测单个主机的信令端口：能建立 TCP 连接即视为服务器。
-  Future<void> _probeHost(String host) async {
-    if (_discoveredUrl != null || _userEditedServer) return;
-    try {
-      final socket = await Socket.connect(
-        host,
-        _signalPort,
-        timeout: const Duration(milliseconds: 700),
-      );
-      socket.destroy();
-      _onServerFound(host, _signalPort);
-    } catch (_) {
-      // 该主机未监听 8765，忽略
-    }
+    await _discoveryService.start(_onServerFound);
   }
 
   /// 启动扫描超时：一开始显示"正在自动发现"，若 8 秒内未自动发现且用户未手动改地址，
@@ -146,17 +54,16 @@ class _HomePageState extends State<HomePage> {
     if (mounted) setState(() => _scanning = true);
     _scanTimeout = Timer(const Duration(seconds: 8), () {
       if (_discoveredUrl == null && !_userEditedServer && mounted) {
-        final seg = (_scannedPrefixes ?? []).join(' ');
         setState(() {
           _scanning = false;
-          _discoveryHint = '手机正在持续扫描局域网服务器（已扫网段: $seg）。\n'
-              '若一直未自动填入，可直接手动输入电脑地址：\nws://10.220.63.242:8765';
+          _discoveryHint = '暂未发现服务器。请确认手机和电脑连接同一 Wi-Fi，'
+              '且电脑防火墙已允许 UDP 8766 和 TCP 8765。';
         });
       }
     });
   }
 
-  /// 统一的"发现到服务器"处理：TCP 扫描命中后调用。
+  /// 统一的"发现到服务器"处理：任一发现通道命中后调用。
   /// 查到立即填入地址、停止扫描超时提示、自动连接（幂等，只生效一次）。
   void _onServerFound(String ip, int port) {
     if (_userEditedServer || _discoveredUrl != null) return;
@@ -170,17 +77,19 @@ class _HomePageState extends State<HomePage> {
       _scanning = false;
       _discoveryHint = null;
     });
+    unawaited(_discoveryService.stop());
     // 自动连接（仅在当前未连接时）
     final vm = context.read<CallViewModel>();
-    if (vm.state != CallState.connected &&
-        vm.state != CallState.connecting) {
+    if (vm.state != CallState.connected && vm.state != CallState.connecting) {
       _autoConnect(vm);
     }
   }
 
-  /// 重新扫描：清空手动标记与已发现标记，让 TCP 扫描逻辑重新运行
-  void _rescan() {
+  /// 重新扫描：清空手动标记与已发现标记并重启发现服务。
+  Future<void> _rescan() async {
     _scanTimeout?.cancel();
+    await _discoveryService.stop();
+    if (!mounted) return;
     setState(() {
       _userEditedServer = false;
       _discoveredUrl = null;
@@ -192,8 +101,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _autoConnect(CallViewModel vm) async {
-    if (vm.state == CallState.connected ||
-        vm.state == CallState.connecting) {
+    if (vm.state == CallState.connected || vm.state == CallState.connecting) {
       return;
     }
     setState(() => _isConnecting = true);
@@ -213,6 +121,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _scanTimeout?.cancel();
+    unawaited(_discoveryService.stop());
     _serverController.dispose();
     _roomController.dispose();
     super.dispose();
@@ -261,6 +170,7 @@ class _HomePageState extends State<HomePage> {
                     onChanged: (_) {
                       // 用户手动修改地址后，后续发现信标不再覆盖
                       _userEditedServer = true;
+                      unawaited(_discoveryService.stop());
                       setState(() {});
                     },
                     decoration: InputDecoration(
