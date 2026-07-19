@@ -15,25 +15,28 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             "video_chat/network_discovery",
         ).setMethodCallHandler { call, result ->
-            if (call.method == "getWifiIpv4") {
-                result.success(getWifiIpv4())
+            if (call.method == "getWifiNetwork") {
+                result.success(getWifiNetwork())
             } else {
                 result.notImplemented()
             }
         }
     }
 
-    private fun getWifiIpv4(): String? {
+    private fun getWifiNetwork(): Map<String, Any>? {
         val manager = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
             as ConnectivityManager
         val wifiNetwork = manager.allNetworks.firstOrNull { network ->
             manager.getNetworkCapabilities(network)
                 ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         } ?: return null
-        return manager.getLinkProperties(wifiNetwork)
+        val linkAddress = manager.getLinkProperties(wifiNetwork)
             ?.linkAddresses
             ?.firstOrNull { it.address is Inet4Address && !it.address.isLoopbackAddress }
-            ?.address
-            ?.hostAddress
+            ?: return null
+        return mapOf(
+            "address" to (linkAddress.address.hostAddress ?: return null),
+            "prefixLength" to linkAddress.prefixLength,
+        )
     }
 }

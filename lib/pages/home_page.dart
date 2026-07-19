@@ -27,7 +27,7 @@ class _HomePageState extends State<HomePage> {
 
   bool _isConnecting = false;
 
-  /// 根据手机 Wi-Fi IP 扫描同一网段的固定端口 8765。
+  /// 根据手机 Wi-Fi IP 和网络前缀扫描固定端口 8765。
   bool _userEditedServer = false; // 用户手动改过地址则不自动覆盖
   String? _discoveredUrl;
   Timer? _scanTimeout; // 扫描超时提示定时器
@@ -45,25 +45,29 @@ class _HomePageState extends State<HomePage> {
   Future<void> _startDiscovery() async {
     _startScanTimeout();
     await _discoveryService.start(_onServerFound);
+    if (_discoveredUrl == null && !_userEditedServer && mounted) {
+      _scanTimeout?.cancel();
+      setState(() {
+        _scanning = false;
+        _discoveryHint = '未在手机 Wi-Fi 网段发现服务器。请确认电脑防火墙已允许 TCP 8765。';
+      });
+    }
   }
 
-  /// 启动扫描超时：一开始显示"正在自动发现"，若 8 秒内未自动发现且用户未手动改地址，
-  /// 给出温和提示（含手动地址与手机实际网段，便于排查），但后台扫描不停止。
+  /// 网段较大时提示扫描仍在继续，避免用户误以为程序卡住。
   void _startScanTimeout() {
     _scanTimeout?.cancel();
     if (mounted) setState(() => _scanning = true);
     _scanTimeout = Timer(const Duration(seconds: 8), () {
       if (_discoveredUrl == null && !_userEditedServer && mounted) {
         setState(() {
-          _scanning = false;
-          _discoveryHint = '暂未在手机 Wi-Fi 网段发现服务器。请确认手机和电脑连接同一 Wi-Fi，'
-              '且电脑防火墙已允许 TCP 8765。';
+          _discoveryHint = '手机 Wi-Fi 网段较大，正在继续查找服务器…';
         });
       }
     });
   }
 
-  /// 统一的"发现到服务器"处理：任一发现通道命中后调用。
+  /// 找到监听固定端口的服务器后补全地址。
   /// 查到立即填入地址、停止扫描超时提示、自动连接（幂等，只生效一次）。
   void _onServerFound(String ip, int port) {
     if (_userEditedServer || _discoveredUrl != null) return;
