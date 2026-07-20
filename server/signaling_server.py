@@ -24,8 +24,8 @@ import asyncio
 import json
 import logging
 import socket
+import subprocess
 import sys
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -389,10 +389,31 @@ async def heartbeat_task():
         )
 
 
-# ─── 局域网发现信标（UDP 广播，供客户端自动识别服务器 IP）───
+# ─── 局域网地址 ────────────────────────────────────────────
 
 def _get_lan_ip() -> str:
     """获取本机用于访问局域网的出口 IP（即信令服务器对外的 LAN 地址）。"""
+    if sys.platform == "win32":
+        command = (
+            "Get-NetIPConfiguration | Where-Object { "
+            "$_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' -and "
+            "$_.NetAdapter.InterfaceDescription -notmatch "
+            "'virtual|tunnel|vpn|wsl|hyper-v|loopback' } | "
+            "ForEach-Object { $_.IPv4Address.IPAddress }"
+        )
+        try:
+            output = subprocess.check_output(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                text=True,
+                timeout=5,
+            )
+            for candidate in output.splitlines():
+                ip = candidate.strip()
+                if ip:
+                    return ip
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         # 连接外部地址以取得本地出口 IP（不会真正发包）
@@ -405,79 +426,6 @@ def _get_lan_ip() -> str:
     return ip
 
 
-# 局域网发现相关常量
-DISCOVERY_PORT = 8766
-DISCOVERY_MCAST = "239.255.255.250"  # 管理作用域组播，多数 AP 会转发到无线客户端
-
-
-def start_discovery_beacon(port: int) -> None:
-    """周期性向局域网通告信令服务器地址，供手机/桌面客户端自动发现。
-
-    三条送达通道（覆盖不同网络环境，尤其 Android）：
-      1. 有限广播 255.255.255.255:8766
-      2. 组播 239.255.255.250:8766（客户端 joinMulticast 后由 AP 转发，Android 友好）
-      3. 收到客户端查询(videochat-discover-query)后，单播回复发件方
-         （单播回包几乎不被网络拦截，可绕过广播/组播被丢弃的情况）
-    """
-    import threading
-
-    lan_ip = _get_lan_ip()
-    payload = json.dumps(
-        {"type": "videochat-discovery", "ip": lan_ip, "port": port}
-    ).encode("utf-8")
-
-    # 接收端：绑定 8766，处理客户端查询并单播回复发件方
-    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        rx.bind(("0.0.0.0", DISCOVERY_PORT))
-    except OSError as e:
-        log.warning(f"发现端口 {DISCOVERY_PORT} 绑定失败: {e}")
-    rx.settimeout(1.0)
-
-    # 发送端：广播 + 组播
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-    except OSError:
-        pass
-
-    def _loop() -> None:
-        while True:
-            # 1+2：周期通告（广播 + 组播）
-            try:
-                tx.sendto(payload, ("255.255.255.255", DISCOVERY_PORT))
-            except OSError as e:
-                log.warning(f"广播信标失败: {e}")
-            try:
-                tx.sendto(payload, (DISCOVERY_MCAST, DISCOVERY_PORT))
-            except OSError as e:
-                log.warning(f"组播信标失败: {e}")
-            # 3：处理客户端查询，单播回复发件方（绕过广播/组播被丢弃的情况）
-            try:
-                data, addr = rx.recvfrom(4096)
-            except socket.timeout:
-                continue
-            except OSError:
-                continue
-            try:
-                msg = json.loads(data.decode("utf-8", errors="ignore"))
-            except Exception:
-                continue
-            if msg.get("type") == "videochat-discover-query":
-                try:
-                    rx.sendto(payload, addr)
-                except OSError:
-                    pass
-
-    threading.Thread(target=_loop, daemon=True).start()
-    log.info(
-        f"📡 局域网发现已开启: ws://{lan_ip}:{port} "
-        f"(广播/组播 :{DISCOVERY_PORT} + 查询单播回包)"
-    )
-
-
 # ─── 启动入口 ──────────────────────────────────────────────
 
 async def main(host: str = "0.0.0.0", port: int = 8765):
@@ -487,6 +435,7 @@ async def main(host: str = "0.0.0.0", port: int = 8765):
     log.info("  P2P 视频通话 - 信令服务器")
     log.info("=" * 50)
     log.info(f"  监听地址: ws://{host}:{port}")
+    log.info(f"  手机端请复制此地址: ws://{_get_lan_ip()}:{port}")
     log.info(f"  协议版本: v1.0 (WebRTC P2P)")
     log.info(f"  Python:   {sys.version.split()[0]}")
     log.info(f"  启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -494,9 +443,6 @@ async def main(host: str = "0.0.0.0", port: int = 8765):
 
     # 启动心跳任务
     asyncio.create_task(heartbeat_task())
-
-    # 启动局域网发现信标（UDP 广播自身地址，手机端自动识别服务器 IP）
-    start_discovery_beacon(port)
 
     # 启动 WebSocket 服务
     async with websockets.serve(
