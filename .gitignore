@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# WorkBuddy 本地工作区（记忆/草稿，不入库）
+.workbuddy/
+
+# Python 虚拟环境
+.venv/

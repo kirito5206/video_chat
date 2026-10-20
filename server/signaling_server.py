@@ -24,7 +24,6 @@ import asyncio
 import json
 import logging
 import socket
-import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -391,39 +390,79 @@ async def heartbeat_task():
 
 # ─── 局域网地址 ────────────────────────────────────────────
 
-def _get_lan_ip() -> str:
-    """获取本机用于访问局域网的出口 IP（即信令服务器对外的 LAN 地址）。"""
-    if sys.platform == "win32":
-        command = (
-            "Get-NetIPConfiguration | Where-Object { "
-            "$_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' -and "
-            "$_.NetAdapter.InterfaceDescription -notmatch "
-            "'virtual|tunnel|vpn|wsl|hyper-v|loopback' } | "
-            "ForEach-Object { $_.IPv4Address.IPAddress }"
-        )
-        try:
-            output = subprocess.check_output(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-                text=True,
-                timeout=5,
-            )
-            for candidate in output.splitlines():
-                ip = candidate.strip()
-                if ip:
-                    return ip
-        except (OSError, subprocess.SubprocessError):
-            pass
+def _is_usable_lan_ip(ip: str) -> bool:
+    """是否是可用于局域网访问的 IPv4 地址（排除回环与链路本地 169.254.x）。"""
+    if not ip:
+        return False
+    if ip.startswith("127.") or ip.startswith("169.254."):
+        return False
+    return True
 
+
+def _get_lan_ip() -> str:
+    """获取本机用于访问局域网的出口 IP（即信令服务器对外的 LAN 地址）。
+
+    使用 UDP 连接技巧：向一个公网地址 connect 一个 UDP socket（SOCK_DGRAM
+    不会真正发包），内核据此选出默认路由对应的本地网卡地址——正是与外网/
+    局域网通信的出口 IP，天然避开 Hyper-V / WSL 等虚拟网卡。
+
+    此法为纯 socket、毫秒级完成，替代旧的 PowerShell 子进程方案
+    （拉起 powershell.exe 需 3-5 秒，且依赖其存在性/输出编码，中文 Windows
+    下解码异常会让服务器启动直接崩溃）。
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         # 连接外部地址以取得本地出口 IP（不会真正发包）
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
+        if _is_usable_lan_ip(ip):
+            return ip
     except OSError:
-        ip = "127.0.0.1"
+        pass
     finally:
         s.close()
-    return ip
+
+    # 兜底：从枚举到的所有网卡地址里取第一个可用的
+    all_ips = _get_all_lan_ips()
+    return all_ips[0] if all_ips else "127.0.0.1"
+
+
+def _get_all_lan_ips() -> list[str]:
+    """枚举本机所有可用于局域网访问的 IPv4 地址（默认出口 IP 排在最前）。
+
+    用于启动横幅里列出全部候选地址：当默认出口网卡与手机不在同一网段时，
+    用户可从候选里挑正确的地址手动填到手机端。
+    """
+    ips: list[str] = []
+
+    # 1) 默认出口 IP 优先（UDP 连接技巧）
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        primary = s.getsockname()[0]
+        if _is_usable_lan_ip(primary):
+            ips.append(primary)
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+    # 2) 追加主机名解析出的其余地址（可能含以太网/其它物理网卡）
+    #    过滤末位为 .1 的地址：这类几乎总是路由器 / Hyper-V / WSL 虚拟交换机的
+    #    宿主地址，手机无法连到，列进候选只会误导用户。默认出口 IP（上面已加入）
+    #    不受此过滤影响。
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not _is_usable_lan_ip(ip) or ip in ips:
+                continue
+            if ip.rsplit(".", 1)[-1] == "1":
+                continue
+            ips.append(ip)
+    except OSError:
+        pass
+
+    return ips
 
 
 # ─── 启动入口 ──────────────────────────────────────────────
@@ -431,11 +470,18 @@ def _get_lan_ip() -> str:
 async def main(host: str = "0.0.0.0", port: int = 8765):
     """启动信令服务器"""
 
+    lan_ips = _get_all_lan_ips()
+    primary_ip = lan_ips[0] if lan_ips else "127.0.0.1"
+
     log.info("=" * 50)
     log.info("  P2P 视频通话 - 信令服务器")
     log.info("=" * 50)
     log.info(f"  监听地址: ws://{host}:{port}")
-    log.info(f"  手机端请复制此地址: ws://{_get_lan_ip()}:{port}")
+    log.info(f"  手机端请复制此地址: ws://{primary_ip}:{port}")
+    if len(lan_ips) > 1:
+        log.info("  若上面地址手机连不上，可换用以下候选地址：")
+        for ip in lan_ips[1:]:
+            log.info(f"      ws://{ip}:{port}")
     log.info(f"  协议版本: v1.0 (WebRTC P2P)")
     log.info(f"  Python:   {sys.version.split()[0]}")
     log.info(f"  启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

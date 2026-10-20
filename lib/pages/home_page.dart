@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../viewmodels/call_viewmodel.dart';
@@ -23,6 +26,9 @@ class _HomePageState extends State<HomePage> {
   final _roomController = TextEditingController();
 
   bool _isConnecting = false;
+
+  /// 分享给手机端的服务器地址（连接成功后解析出局域网 IP 填充）
+  String? _lanAddress;
 
   @override
   void dispose() {
@@ -83,7 +89,8 @@ class _HomePageState extends State<HomePage> {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        '请从电脑服务器窗口复制完整地址并粘贴到这里',
+                        '默认连接本机服务器 ws://localhost:8765；'
+                        '跨设备通话时请改为电脑局域网地址',
                         style: TextStyle(
                           fontSize: 12,
                           color: Theme.of(context).colorScheme.outline,
@@ -147,6 +154,12 @@ class _HomePageState extends State<HomePage> {
                         ],
                       ),
                     ),
+                  ],
+
+                  // ─── 分享给手机端（连接成功后显示）────────
+                  if (vm.state == CallState.connected && _lanAddress != null) ...[
+                    const SizedBox(height: 16),
+                    _buildShareCard(),
                   ],
 
                   const SizedBox(height: 28),
@@ -322,6 +335,8 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isConnecting = true);
     try {
       await vm.connect(url);
+      // 连接成功后解析出可分享给手机端的局域网地址
+      await _refreshShareableAddress();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -337,6 +352,8 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isConnecting = true);
     try {
       await vm.disconnect();
+      // 断开后清除分享地址
+      if (mounted) setState(() => _lanAddress = null);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -364,5 +381,158 @@ class _HomePageState extends State<HomePage> {
     return '${now.year}${now.month.toString().padLeft(2, '0')}'
            '${now.day.toString().padLeft(2, '0')}-'
            '${now.millisecondsSinceEpoch.toString().substring(6)}';
+  }
+
+  /// 连接成功后，解析出可分享给手机端的局域网地址
+  Future<void> _refreshShareableAddress() async {
+    final url = _serverController.text.trim();
+    final addr = await _resolveShareableAddress(url);
+    if (mounted) setState(() => _lanAddress = addr);
+  }
+
+  /// 根据已连接的服务器地址，生成可分享给手机端的 ws:// 地址。
+  /// 若连接的是 localhost/127.0.0.1，则替换为本机局域网 IP。
+  Future<String?> _resolveShareableAddress(String connectedUrl) async {
+    Uri? uri;
+    try {
+      uri = Uri.parse(connectedUrl);
+    } catch (_) {
+      return null;
+    }
+    final host = uri.host;
+    final port = uri.port;
+
+    // 已经是一个具体的非回环地址（比如用户手动填了局域网 IP），直接复用
+    if (host.isNotEmpty && host != 'localhost' && host != '127.0.0.1') {
+      final ip = InternetAddress.tryParse(host);
+      if (ip != null && !ip.isLoopback) return connectedUrl;
+    }
+
+    // 否则解析本机局域网 IP（信令服务器通常就在这台电脑上）
+    final lanIp = await _getLocalLanIp();
+    if (lanIp == null) return null;
+    return 'ws://$lanIp:$port';
+  }
+
+  /// 获取本机用于局域网通信的 IPv4 地址。
+  /// 优先用 UDP 连接技巧取出口网卡 IP，失败则枚举网卡兜底。
+  Future<String?> _getLocalLanIp() async {
+    // 1) UDP 连接技巧：内核据此选出默认路由对应的本地地址（与服务器同款逻辑）
+    try {
+      final sock = await RawSocket.connect(
+        InternetAddress('8.8.8.8'),
+        80,
+        timeout: const Duration(milliseconds: 800),
+      );
+      final ip = sock.address.address;
+      sock.close();
+      if (_isLanIp(ip)) return ip;
+    } catch (_) {
+      // 忽略，进入兜底
+    }
+
+    // 2) 兜底：枚举物理网卡，取第一个私有网段地址
+    try {
+      final ifaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          if (_isLanIp(a.address)) return a.address;
+        }
+      }
+    } catch (_) {
+      // 忽略
+    }
+    return null;
+  }
+
+  /// 判断是否为私有/局域网 IPv4 地址（10./192.168./172.16~31.）
+  bool _isLanIp(String ip) {
+    if (ip.startsWith('10.')) return true;
+    if (ip.startsWith('192.168.')) return true;
+    if (ip.startsWith('172.')) {
+      final second = int.tryParse(ip.split('.').elementAtOrNull(1) ?? '');
+      if (second != null && second >= 16 && second <= 31) return true;
+    }
+    return false;
+  }
+
+  /// 复制分享地址到剪贴板，并提示用户
+  Future<void> _copyAddress() async {
+    if (_lanAddress == null) return;
+    await Clipboard.setData(ClipboardData(text: _lanAddress!));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已复制: $_lanAddress')),
+      );
+    }
+  }
+
+  /// 分享给手机端的地址卡片（含复制按钮）
+  Widget _buildShareCard() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: colorScheme.primaryContainer.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: colorScheme.primary.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.share_location_rounded, size: 18,
+                  color: colorScheme.primary),
+              const SizedBox(width: 8),
+              Text('分享给手机端',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      )),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '把这个地址发给手机，在手机端粘贴即可连接同一台服务器：',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: colorScheme.outline,
+                ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: colorScheme.outlineVariant),
+                  ),
+                  child: SelectableText(
+                    _lanAddress!,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontFamily: 'monospace',
+                        ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: _copyAddress,
+                icon: const Icon(Icons.copy_rounded, size: 18),
+                label: const Text('复制'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
